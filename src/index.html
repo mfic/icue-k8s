@@ -54,6 +54,7 @@
         <span class="page-dots" id="page-dots">
           <span class="page-dot active" data-page="0"></span>
           <span class="page-dot"        data-page="1"></span>
+          <span class="page-dot"        data-page="2"></span>
         </span>
         <span class="refresh-indicator" id="refresh-indicator"></span>
         <span class="refresh-btn" id="refresh-btn" title="Refresh">↻</span>
@@ -101,8 +102,16 @@
         </div>
       </div>
 
-      <!-- Page 2: Namespace drill-down -->
+      <!-- Page 2: Cluster health -->
       <div class="page" id="page-2" hidden>
+        <div class="workloads-section">
+          <div class="events-title">Cluster health</div>
+          <div class="health-list" id="health-list"></div>
+        </div>
+      </div>
+
+      <!-- Page 3: Namespace drill-down (no dot — overlay from page 1) -->
+      <div class="page" id="page-3" hidden>
         <div class="workloads-section">
           <div class="events-title" id="ns-detail-title">Workloads</div>
           <div class="wl-list" id="wl-list"></div>
@@ -287,6 +296,105 @@ function renderEvents(events) {
   }).join('');
 }
 
+// ── Render health summary ────────────────────────────────────────────────────
+function metricCls(pct) {
+  return pct >= 90 ? 'err' : pct >= 70 ? 'warn' : '';
+}
+
+function renderHealth(h) {
+  const parts = [];
+
+  // Nodes
+  parts.push('<div class="health-section-title">Nodes' +
+    (h.metrics_available ? '' : ' <span style="opacity:.45;font-weight:400">(no metrics-server)</span>') +
+    '</div>');
+  for (const n of h.nodes) {
+    const role = n.role === 'master' ? 'M' : 'W';
+    const roleCls = n.role === 'master' ? 'master' : 'worker';
+    const readyDot = n.ready ? 'dot-ok' : 'dot-err';
+    let metrics = '';
+    if (h.metrics_available && n.cpu_usage_m !== null) {
+      const cpuPct = Math.round(n.cpu_usage_m / n.cpu_cap_m * 100);
+      const memPct = Math.round(n.mem_usage_bytes / n.mem_cap_bytes * 100);
+      const cpuCls = metricCls(cpuPct);
+      const memCls = metricCls(memPct);
+      metrics = `<div class="node-metrics">
+        <div class="node-metric">
+          <span class="node-metric-label">CPU</span>
+          <div class="mini-bar"><div class="mini-bar-fill ${cpuCls}" style="width:${cpuPct}%"></div></div>
+          <span class="node-metric-pct">${cpuPct}%</span>
+        </div>
+        <div class="node-metric">
+          <span class="node-metric-label">MEM</span>
+          <div class="mini-bar"><div class="mini-bar-fill ${memCls}" style="width:${memPct}%"></div></div>
+          <span class="node-metric-pct">${memPct}%</span>
+        </div>
+      </div>`;
+    }
+    const warnings = n.conditions.length
+      ? `<span style="font-size:var(--font-small);color:var(--warn);margin-left:.5em">${n.conditions.join(' ')}</span>`
+      : '';
+    parts.push(`<div class="node-row">
+      <span class="node-role-badge ${roleCls}">${role}</span>
+      <span class="node-name">${dot(readyDot)} ${esc(n.name)}${warnings}</span>
+      ${metrics}
+    </div>`);
+  }
+
+  // Crashing pods
+  parts.push('<div class="health-section-title">Pod issues</div>');
+  if (!h.crashing_pods.length) {
+    parts.push('<div class="health-ok">✓ No crashing pods</div>');
+  } else {
+    for (const p of h.crashing_pods) {
+      const cls = p.reason === 'CrashLoopBackOff' || p.reason === 'OOMKilled' ? 'err' : 'warn';
+      parts.push(`<div class="issue-row ${cls}">
+        <span class="issue-name">${esc(p.name)}</span>
+        <span class="issue-ns">${esc(p.namespace)}</span>
+        <span class="issue-badge">${esc(p.reason === 'HighRestarts' ? '×'+p.restarts : p.reason)}</span>
+      </div>`);
+    }
+  }
+
+  // PVCs
+  const pvc = h.pvcs;
+  const totalPvc = pvc.bound + pvc.pending + pvc.lost;
+  parts.push(`<div class="health-section-title">Storage (${totalPvc} PVCs)</div>`);
+  parts.push(`<div class="pvc-summary">
+    <span class="pvc-stat"><b class="ok">${pvc.bound}</b> bound</span>
+    <span class="pvc-stat"><b class="${pvc.pending > 0 ? 'warn' : ''}">${pvc.pending}</b> pending</span>
+    <span class="pvc-stat"><b class="${pvc.lost > 0 ? 'err' : ''}">${pvc.lost}</b> lost</span>
+  </div>`);
+  for (const p of pvc.issues) {
+    const cls = p.phase === 'Lost' ? 'err' : 'warn';
+    parts.push(`<div class="issue-row ${cls}">
+      <span class="issue-name">${esc(p.name)}</span>
+      <span class="issue-ns">${esc(p.namespace)}</span>
+      <span class="issue-badge">${esc(p.phase)}</span>
+    </div>`);
+  }
+
+  // Certs
+  if (h.certs.available) {
+    parts.push('<div class="health-section-title">Certificates</div>');
+    if (!h.certs.expiring.length) {
+      parts.push('<div class="health-ok">✓ All certs OK (&gt;30 d)</div>');
+    } else {
+      for (const c of h.certs.expiring) {
+        const cls = c.days <= 7 ? 'err' : 'warn';
+        const label = c.days < 0 ? 'expired' : c.days + 'd';
+        parts.push(`<div class="cert-row ${cls}">
+          <span class="cert-name">${esc(c.name)}</span>
+          <span class="cert-ns">${esc(c.namespace)}</span>
+          <span class="cert-days">${label}</span>
+        </div>`);
+      }
+    }
+  }
+
+  document.getElementById('health-list').innerHTML = parts.join('');
+}
+
 // ── Refresh logic ────────────────────────────────────────────────────────────
 function startRefreshIndicatorTick() {
   if (refreshTick) clearInterval(refreshTick);
@@ -302,14 +410,16 @@ async function refresh() {
   btn.style.animation = 'spin .6s linear infinite';
   try {
     const ctx = currentContext() ? '?context=' + encodeURIComponent(currentContext()) : '';
-    const [stats, events, workloads] = await Promise.all([
-      apiFetch('/stats'     + ctx),
-      apiFetch('/events'    + ctx),
-      apiFetch('/workloads' + ctx),
+    const [stats, events, workloads, health] = await Promise.all([
+      apiFetch('/stats'          + ctx),
+      apiFetch('/events'         + ctx),
+      apiFetch('/workloads'      + ctx),
+      apiFetch('/health-summary' + ctx),
     ]);
     renderStats(stats);
     renderEvents(events);
     renderWorkloads(workloads);
+    renderHealth(health);
     lastRefreshTime = Date.now();
     document.getElementById('refresh-indicator').textContent = 'just now';
     showContent();
@@ -328,15 +438,16 @@ function scheduleRefresh() {
 // ── Page switch ──────────────────────────────────────────────────────────────
 function switchPage(index) {
   currentPage = index;
-  if (index < 2) savePage();   // don't persist the drill-down
+  if (index < 3) savePage();   // don't persist the drill-down overlay
   document.querySelectorAll('.page').forEach((p, i) => {
     p.hidden = (i !== currentPage);
   });
-  const dotActive = currentPage === 2 ? 1 : currentPage;
+  // dot active: page 3 (drill-down) keeps page-1 dot lit
+  const dotActive = currentPage === 3 ? 1 : currentPage;
   document.querySelectorAll('.page-dot').forEach(d => {
     d.classList.toggle('active', Number(d.dataset.page) === dotActive);
   });
-  const onDetail = currentPage === 2;
+  const onDetail = currentPage === 3;
   document.getElementById('ctx-switcher').hidden = onDetail;
   document.getElementById('ns-nav').hidden       = !onDetail;
   document.getElementById('page-dots').hidden    = onDetail;
@@ -344,10 +455,10 @@ function switchPage(index) {
 
 // ── Namespace drill-down ─────────────────────────────────────────────────────
 async function drillDown(ns) {
-  document.getElementById('ns-nav-name').textContent  = ns;
+  document.getElementById('ns-nav-name').textContent     = ns;
   document.getElementById('ns-detail-title').textContent = ns;
   document.getElementById('wl-list').innerHTML = '<div class="no-events">Loading…</div>';
-  switchPage(2);
+  switchPage(3);
   try {
     const ctx = currentContext() ? '?context=' + encodeURIComponent(currentContext()) : '';
     const data = await apiFetch('/namespace/' + encodeURIComponent(ns) + '/workloads' + ctx);

@@ -3,7 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from kubernetes import client, config
 from kubernetes.config.kube_config import KUBE_CONFIG_DEFAULT_LOCATION
 from datetime import datetime, timezone
-import yaml, os, logging
+import yaml, os, logging, re
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger(__name__)
@@ -204,6 +204,146 @@ def get_workloads(context: str | None = Query(None)):
         raise
     except Exception:
         log.exception("workloads error")
+        raise HTTPException(status_code=500, detail="Internal error — check server logs")
+
+
+def _parse_cpu(s: str) -> int:
+    if s.endswith('m'):
+        return int(s[:-1])
+    return int(float(s) * 1000)
+
+def _parse_mem(s: str) -> int:
+    m = re.match(r'^(\d+)(Ki|Mi|Gi|Ti|K|M|G|T)?$', s)
+    if not m:
+        return int(s)
+    v, unit = int(m.group(1)), m.group(2) or ''
+    return v * {'Ki':1024,'Mi':1024**2,'Gi':1024**3,'Ti':1024**4,
+                'K':1000,'M':1000**2,'G':1000**3,'T':1000**4}.get(unit, 1)
+
+def _node_role(node) -> str:
+    labels = node.metadata.labels or {}
+    if any(k in labels for k in ('node-role.kubernetes.io/control-plane',
+                                  'node-role.kubernetes.io/master')):
+        return 'master'
+    return 'worker'
+
+
+@app.get("/health-summary")
+def get_health_summary(context: str | None = Query(None)):
+    context = validate_context(context)
+    try:
+        v1      = get_api(context, client.CoreV1Api)
+        apps_v1 = get_api(context, client.AppsV1Api)
+
+        # ── Nodes + optional metrics ─────────────────────────────────────────
+        nodes_raw = v1.list_node().items
+        try:
+            cust = get_api(context, client.CustomObjectsApi)
+            nm   = cust.list_cluster_custom_object("metrics.k8s.io", "v1beta1", "nodes")
+            usage_map = {i['metadata']['name']: i['usage'] for i in nm['items']}
+            metrics_ok = True
+        except Exception:
+            usage_map  = {}
+            metrics_ok = False
+
+        nodes_out = []
+        for n in sorted(nodes_raw, key=lambda x: (_node_role(x) != 'master', x.metadata.name)):
+            cap  = n.status.capacity or {}
+            alloc = n.status.allocatable or {}
+            cpu_cap = _parse_cpu(alloc.get('cpu', cap.get('cpu', '0')))
+            mem_cap = _parse_mem(alloc.get('memory', cap.get('memory', '0')))
+            ready = any(c.type == 'Ready' and c.status == 'True'
+                        for c in (n.status.conditions or []))
+            conditions = [c.type for c in (n.status.conditions or [])
+                          if c.type != 'Ready' and c.status == 'True']
+            entry: dict = {
+                'name': n.metadata.name,
+                'role': _node_role(n),
+                'ready': ready,
+                'conditions': conditions,
+                'cpu_cap_m': cpu_cap,
+                'mem_cap_bytes': mem_cap,
+                'cpu_usage_m': None,
+                'mem_usage_bytes': None,
+            }
+            if metrics_ok and n.metadata.name in usage_map:
+                u = usage_map[n.metadata.name]
+                entry['cpu_usage_m']    = _parse_cpu(u.get('cpu', '0'))
+                entry['mem_usage_bytes'] = _parse_mem(u.get('memory', '0'))
+            nodes_out.append(entry)
+
+        # ── Crashing / restarting pods ───────────────────────────────────────
+        BAD_REASONS = {'CrashLoopBackOff', 'OOMKilled', 'Error',
+                       'ImagePullBackOff', 'ErrImagePull'}
+        crashing = []
+        for p in v1.list_pod_for_all_namespaces(limit=1000).items:
+            for cs in (p.status.container_statuses or []):
+                reason = (cs.state.waiting.reason
+                          if cs.state and cs.state.waiting else None)
+                if reason in BAD_REASONS or cs.restart_count > 10:
+                    crashing.append({
+                        'namespace': p.metadata.namespace,
+                        'name':      p.metadata.name,
+                        'reason':    reason or 'HighRestarts',
+                        'restarts':  cs.restart_count,
+                    })
+                    break
+
+        # ── PVCs ─────────────────────────────────────────────────────────────
+        pvc_counts: dict[str, int] = {'Bound': 0, 'Pending': 0, 'Lost': 0}
+        pvc_issues = []
+        for pvc in v1.list_persistent_volume_claim_for_all_namespaces().items:
+            phase = pvc.status.phase or 'Unknown'
+            pvc_counts[phase] = pvc_counts.get(phase, 0) + 1
+            if phase in ('Pending', 'Lost'):
+                pvc_issues.append({
+                    'namespace': pvc.metadata.namespace,
+                    'name':      pvc.metadata.name,
+                    'phase':     phase,
+                })
+
+        # ── Certificates (cert-manager) ──────────────────────────────────────
+        certs_ok   = False
+        cert_expiring = []
+        try:
+            cust  = get_api(context, client.CustomObjectsApi)
+            clist = cust.list_cluster_custom_object("cert-manager.io", "v1", "certificates")
+            certs_ok = True
+            now = datetime.now(timezone.utc)
+            for cert in clist.get('items', []):
+                not_after = (cert.get('status') or {}).get('notAfter')
+                if not_after:
+                    exp = datetime.fromisoformat(not_after.replace('Z', '+00:00'))
+                    days = (exp - now).days
+                    if days < 30:
+                        cert_expiring.append({
+                            'namespace': cert['metadata']['namespace'],
+                            'name':      cert['metadata']['name'],
+                            'days':      days,
+                        })
+            cert_expiring.sort(key=lambda x: x['days'])
+        except Exception:
+            pass
+
+        return {
+            'nodes':           nodes_out,
+            'metrics_available': metrics_ok,
+            'crashing_pods':   sorted(crashing, key=lambda x: -x['restarts']),
+            'pvcs': {
+                'bound':   pvc_counts.get('Bound',   0),
+                'pending': pvc_counts.get('Pending', 0),
+                'lost':    pvc_counts.get('Lost',    0),
+                'issues':  pvc_issues,
+            },
+            'certs': {
+                'available': certs_ok,
+                'expiring':  cert_expiring,
+            },
+        }
+    except HTTPException:
+        raise
+    except Exception:
+        log.exception("health-summary error")
         raise HTTPException(status_code=500, detail="Internal error — check server logs")
 
 

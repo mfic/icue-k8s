@@ -3,7 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from kubernetes import client, config
 from kubernetes.config.kube_config import KUBE_CONFIG_DEFAULT_LOCATION
 from datetime import datetime, timezone
-import yaml, os, logging, re
+import yaml, os, logging, re, json, urllib.parse
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger(__name__)
@@ -30,10 +30,30 @@ app.add_middleware(
 KUBECONFIG_PATH = os.environ.get("KUBECONFIG", KUBE_CONFIG_DEFAULT_LOCATION)
 
 
-def get_api(context: str | None, api_class):
+def _make_api_client(context: str | None) -> client.ApiClient:
     cfg = client.Configuration()
     config.load_kube_config(config_file=KUBECONFIG_PATH, context=context, client_configuration=cfg)
-    return api_class(client.ApiClient(cfg))
+    return client.ApiClient(cfg)
+
+def get_api(context: str | None, api_class):
+    return api_class(_make_api_client(context))
+
+
+PROM_SVC = (
+    "/api/v1/namespaces/monitoring/services/"
+    "http:kube-prometheus-stack-prometheus:9090/proxy"
+)
+
+def _prom_query(api_client: client.ApiClient, query: str) -> list:
+    q    = urllib.parse.quote(query, safe='')
+    url  = f"{api_client.configuration.host.rstrip('/')}{PROM_SVC}/api/v1/query?query={q}"
+    hdrs: dict = {'Accept': 'application/json', 'User-Agent': api_client.user_agent}
+    api_client.update_params_for_auth(hdrs, [], ['BearerToken'])
+    resp = api_client.rest_client.GET(url, headers=hdrs, _preload_content=True, _request_timeout=10)
+    data = json.loads(resp.data)
+    if data.get('status') != 'success':
+        raise ValueError(f"Prometheus: {data}")
+    return data['data']['result']
 
 
 def parse_kubeconfig() -> dict:
@@ -235,42 +255,49 @@ def get_health_summary(context: str | None = Query(None)):
         v1      = get_api(context, client.CoreV1Api)
         apps_v1 = get_api(context, client.AppsV1Api)
 
-        # ── Nodes + optional metrics ─────────────────────────────────────────
+        # ── Nodes ────────────────────────────────────────────────────────────
         nodes_raw = v1.list_node().items
+
+        # Build IP → node-name map for matching Prometheus instance labels
+        ip_to_node: dict[str, str] = {}
+        for n in nodes_raw:
+            for addr in (n.status.addresses or []):
+                if addr.type == 'InternalIP':
+                    ip_to_node[addr.address] = n.metadata.name
+
+        # Try Prometheus for CPU / memory percentages
+        cpu_pct: dict[str, float] = {}
+        mem_pct: dict[str, float] = {}
+        metrics_ok = False
         try:
-            cust = get_api(context, client.CustomObjectsApi)
-            nm   = cust.list_cluster_custom_object("metrics.k8s.io", "v1beta1", "nodes")
-            usage_map = {i['metadata']['name']: i['usage'] for i in nm['items']}
-            metrics_ok = True
+            ac = _make_api_client(context)
+            for r in _prom_query(ac, '100 - (avg by(instance) (rate(node_cpu_seconds_total{mode="idle"}[5m])) * 100)'):
+                ip = r['metric'].get('instance', '').split(':')[0]
+                if ip in ip_to_node:
+                    cpu_pct[ip_to_node[ip]] = round(float(r['value'][1]), 1)
+            for r in _prom_query(ac, '(1 - node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes) * 100'):
+                ip = r['metric'].get('instance', '').split(':')[0]
+                if ip in ip_to_node:
+                    mem_pct[ip_to_node[ip]] = round(float(r['value'][1]), 1)
+            metrics_ok = bool(cpu_pct)
         except Exception:
-            usage_map  = {}
-            metrics_ok = False
+            log.warning("Prometheus metrics unavailable")
 
         nodes_out = []
         for n in sorted(nodes_raw, key=lambda x: (_node_role(x) != 'master', x.metadata.name)):
-            cap  = n.status.capacity or {}
-            alloc = n.status.allocatable or {}
-            cpu_cap = _parse_cpu(alloc.get('cpu', cap.get('cpu', '0')))
-            mem_cap = _parse_mem(alloc.get('memory', cap.get('memory', '0')))
             ready = any(c.type == 'Ready' and c.status == 'True'
                         for c in (n.status.conditions or []))
             conditions = [c.type for c in (n.status.conditions or [])
                           if c.type != 'Ready' and c.status == 'True']
-            entry: dict = {
-                'name': n.metadata.name,
-                'role': _node_role(n),
-                'ready': ready,
+            name = n.metadata.name
+            nodes_out.append({
+                'name':       name,
+                'role':       _node_role(n),
+                'ready':      ready,
                 'conditions': conditions,
-                'cpu_cap_m': cpu_cap,
-                'mem_cap_bytes': mem_cap,
-                'cpu_usage_m': None,
-                'mem_usage_bytes': None,
-            }
-            if metrics_ok and n.metadata.name in usage_map:
-                u = usage_map[n.metadata.name]
-                entry['cpu_usage_m']    = _parse_cpu(u.get('cpu', '0'))
-                entry['mem_usage_bytes'] = _parse_mem(u.get('memory', '0'))
-            nodes_out.append(entry)
+                'cpu_pct':    cpu_pct.get(name),
+                'mem_pct':    mem_pct.get(name),
+            })
 
         # ── Crashing / restarting pods ───────────────────────────────────────
         BAD_REASONS = {'CrashLoopBackOff', 'OOMKilled', 'Error',

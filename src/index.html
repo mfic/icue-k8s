@@ -306,28 +306,26 @@ function renderHealth(h) {
 
   // Nodes
   parts.push('<div class="health-section-title">Nodes' +
-    (h.metrics_available ? '' : ' <span style="opacity:.45;font-weight:400">(no metrics-server)</span>') +
+    (!h.metrics_available ? ' <span style="opacity:.45;font-weight:400">(metrics unavailable)</span>' : '') +
     '</div>');
   for (const n of h.nodes) {
-    const role = n.role === 'master' ? 'M' : 'W';
+    const role    = n.role === 'master' ? 'M' : 'W';
     const roleCls = n.role === 'master' ? 'master' : 'worker';
     const readyDot = n.ready ? 'dot-ok' : 'dot-err';
     let metrics = '';
-    if (h.metrics_available && n.cpu_usage_m !== null) {
-      const cpuPct = Math.round(n.cpu_usage_m / n.cpu_cap_m * 100);
-      const memPct = Math.round(n.mem_usage_bytes / n.mem_cap_bytes * 100);
-      const cpuCls = metricCls(cpuPct);
-      const memCls = metricCls(memPct);
+    if (n.cpu_pct !== null && n.cpu_pct !== undefined) {
+      const cpuCls = metricCls(n.cpu_pct);
+      const memCls = metricCls(n.mem_pct);
       metrics = `<div class="node-metrics">
         <div class="node-metric">
           <span class="node-metric-label">CPU</span>
-          <div class="mini-bar"><div class="mini-bar-fill ${cpuCls}" style="width:${cpuPct}%"></div></div>
-          <span class="node-metric-pct">${cpuPct}%</span>
+          <div class="mini-bar"><div class="mini-bar-fill ${cpuCls}" style="width:${n.cpu_pct}%"></div></div>
+          <span class="node-metric-pct">${n.cpu_pct}%</span>
         </div>
         <div class="node-metric">
           <span class="node-metric-label">MEM</span>
-          <div class="mini-bar"><div class="mini-bar-fill ${memCls}" style="width:${memPct}%"></div></div>
-          <span class="node-metric-pct">${memPct}%</span>
+          <div class="mini-bar"><div class="mini-bar-fill ${memCls}" style="width:${n.mem_pct}%"></div></div>
+          <span class="node-metric-pct">${n.mem_pct}%</span>
         </div>
       </div>`;
     }

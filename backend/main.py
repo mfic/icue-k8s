@@ -159,6 +159,54 @@ def get_events(
         raise HTTPException(status_code=500, detail="Internal error — check server logs")
 
 
+@app.get("/workloads")
+def get_workloads(context: str | None = Query(None)):
+    context = validate_context(context)
+    try:
+        v1      = get_api(context, client.CoreV1Api)
+        apps_v1 = get_api(context, client.AppsV1Api)
+
+        namespaces = [ns.metadata.name for ns in v1.list_namespace().items]
+
+        pods = v1.list_pod_for_all_namespaces(limit=1000)
+        pod_map: dict[str, dict] = {}
+        for p in pods.items:
+            ns = p.metadata.namespace
+            if ns not in pod_map:
+                pod_map[ns] = {"running": 0, "total": 0}
+            pod_map[ns]["total"] += 1
+            if p.status.phase == "Running":
+                pod_map[ns]["running"] += 1
+
+        deploys = apps_v1.list_deployment_for_all_namespaces()
+        dep_map: dict[str, dict] = {}
+        for d in deploys.items:
+            ns = d.metadata.namespace
+            if ns not in dep_map:
+                dep_map[ns] = {"ready": 0, "total": 0}
+            dep_map[ns]["total"] += 1
+            if (d.status.ready_replicas or 0) >= (d.status.replicas or 0) > 0:
+                dep_map[ns]["ready"] += 1
+
+        result = []
+        for ns in sorted(namespaces):
+            pods_ns = pod_map.get(ns, {"running": 0, "total": 0})
+            deps_ns = dep_map.get(ns, {"ready": 0, "total": 0})
+            if pods_ns["total"] == 0 and deps_ns["total"] == 0:
+                continue
+            result.append({
+                "namespace":   ns,
+                "pods":        pods_ns,
+                "deployments": deps_ns,
+            })
+        return result
+    except HTTPException:
+        raise
+    except Exception:
+        log.exception("workloads error")
+        raise HTTPException(status_code=500, detail="Internal error — check server logs")
+
+
 @app.get("/health")
 def health():
     return {"status": "ok"}

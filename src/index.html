@@ -47,41 +47,57 @@
         <span class="ctx-arrow" id="ctx-next">›</span>
       </div>
       <div class="header-right">
+        <span class="page-dots" id="page-dots">
+          <span class="page-dot active" data-page="0"></span>
+          <span class="page-dot"        data-page="1"></span>
+        </span>
         <span class="refresh-indicator" id="refresh-indicator"></span>
         <span class="refresh-btn" id="refresh-btn" title="Refresh">↻</span>
       </div>
     </div>
 
-    <!-- Stats row -->
-    <div class="stats-row">
-      <div class="stat-card">
-        <div class="stat-label">Nodes</div>
-        <div class="stat-value" id="nodes-value">—</div>
-        <div class="stat-sub"   id="nodes-sub"></div>
-      </div>
-      <div class="stat-card">
-        <div class="stat-label">Pods</div>
-        <div class="stat-value" id="pods-value">—</div>
-        <div class="stat-sub"   id="pods-sub"></div>
-      </div>
-      <div class="stat-card">
-        <div class="stat-label">Deployments</div>
-        <div class="stat-value" id="dep-value">—</div>
-        <div class="stat-sub"   id="dep-sub"></div>
-      </div>
-      <div class="stat-card">
-        <div class="stat-label">Namespaces</div>
-        <div class="stat-value" id="ns-value">—</div>
-        <div class="stat-sub"   id="ns-sub"></div>
-      </div>
-    </div>
+    <!-- Pages -->
+    <div class="pages">
 
-    <!-- Events section -->
-    <div class="events-section">
-      <div class="events-title">Recent warnings &amp; errors</div>
-      <div class="events-list" id="events-list"></div>
-    </div>
+      <!-- Page 0: Overview -->
+      <div class="page" id="page-0">
+        <div class="stats-row">
+          <div class="stat-card">
+            <div class="stat-label">Nodes</div>
+            <div class="stat-value" id="nodes-value">—</div>
+            <div class="stat-sub"   id="nodes-sub"></div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-label">Pods</div>
+            <div class="stat-value" id="pods-value">—</div>
+            <div class="stat-sub"   id="pods-sub"></div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-label">Deployments</div>
+            <div class="stat-value" id="dep-value">—</div>
+            <div class="stat-sub"   id="dep-sub"></div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-label">Namespaces</div>
+            <div class="stat-value" id="ns-value">—</div>
+            <div class="stat-sub"   id="ns-sub"></div>
+          </div>
+        </div>
+        <div class="events-section">
+          <div class="events-title">Recent warnings &amp; errors</div>
+          <div class="events-list" id="events-list"></div>
+        </div>
+      </div>
 
+      <!-- Page 1: Workloads by namespace -->
+      <div class="page" id="page-1" hidden>
+        <div class="workloads-section">
+          <div class="events-title">Workloads by namespace</div>
+          <div class="workloads-list" id="workloads-list"></div>
+        </div>
+      </div>
+
+    </div>
   </div>
 </div>
 
@@ -103,10 +119,12 @@ function getIcueProperty(name) {
 // ── State ────────────────────────────────────────────────────────────────────
 let contexts        = [];
 let contextIndex    = 0;
+let currentPage     = 0;
 let refreshTimer    = null;
 let lastRefreshTime = null;
 let refreshTick     = null;
-const STORAGE_KEY   = 'k8s-widget-ctx-index';
+const STORAGE_KEY      = 'k8s-widget-ctx-index';
+const STORAGE_PAGE_KEY = 'k8s-widget-page';
 
 function currentContext() { return contexts[contextIndex] || null; }
 
@@ -116,6 +134,13 @@ function loadStoredIndex() {
 }
 function saveIndex() {
   try { localStorage.setItem(STORAGE_KEY, String(contextIndex)); } catch(e) {}
+}
+function loadStoredPage() {
+  try { const v = localStorage.getItem(STORAGE_PAGE_KEY); if (v !== null) currentPage = parseInt(v, 10) || 0; }
+  catch(e) {}
+}
+function savePage() {
+  try { localStorage.setItem(STORAGE_PAGE_KEY, String(currentPage)); } catch(e) {}
 }
 
 // ── Utils ────────────────────────────────────────────────────────────────────
@@ -128,7 +153,11 @@ function timeAgo(isoStr) {
   return Math.floor(diff/86400) + 'd ago';
 }
 
-function dot(cls) { return `<span class="dot ${cls}"></span>`; }
+function dot(cls) {
+  // ok-dot / warn-dot / err-dot map to dot-ok / dot-warn / dot-err
+  const mapped = cls.replace(/(ok|warn|err)-dot/, 'dot-$1');
+  return `<span class="dot ${mapped}"></span>`;
+}
 
 function baseUrl() {
   return (getIcueProperty('apiUrl') || 'http://localhost:9090').replace(/\/$/, '');
@@ -186,6 +215,36 @@ function renderStats(s) {
   document.getElementById('ns-sub').textContent   = 'active';
 }
 
+// ── Render workloads ─────────────────────────────────────────────────────────
+function nsCls(pods, deps) {
+  if (pods.total > 0 && pods.running === 0) return 'err';
+  if (pods.running < pods.total || (deps.total > 0 && deps.ready < deps.total)) return 'warn';
+  return 'ok';
+}
+
+function renderWorkloads(workloads) {
+  const list = document.getElementById('workloads-list');
+  if (!workloads.length) {
+    list.innerHTML = '<div class="no-events">No workloads found</div>';
+    return;
+  }
+  list.innerHTML = workloads.map(ns => {
+    const cls      = nsCls(ns.pods, ns.deployments);
+    const podCls   = ns.pods.running < ns.pods.total ? (ns.pods.running === 0 ? 'err' : 'warn') : 'ok';
+    const depCls   = ns.deployments.total > 0 && ns.deployments.ready < ns.deployments.total ? 'warn' : 'ok';
+    const depPart  = ns.deployments.total > 0
+      ? `<span class="ns-count"><b class="${depCls}">${ns.deployments.ready}/${ns.deployments.total}</b> dep</span>`
+      : '';
+    return `<div class="ns-row">
+      <div class="ns-name">${dot(cls + '-dot')} ${esc(ns.namespace)}</div>
+      <div class="ns-counts">
+        <span class="ns-count"><b class="${podCls}">${ns.pods.running}/${ns.pods.total}</b> pods</span>
+        ${depPart}
+      </div>
+    </div>`;
+  }).join('');
+}
+
 // ── Render events ─────────────────────────────────────────────────────────────
 function esc(s) {
   return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
@@ -228,16 +287,17 @@ function startRefreshIndicatorTick() {
 
 async function refresh() {
   const btn = document.getElementById('refresh-btn');
-  document.getElementById('widget-root')?.classList.add('refreshing');
   btn.style.animation = 'spin .6s linear infinite';
   try {
     const ctx = currentContext() ? '?context=' + encodeURIComponent(currentContext()) : '';
-    const [stats, events] = await Promise.all([
-      apiFetch('/stats'  + ctx),
-      apiFetch('/events' + ctx),
+    const [stats, events, workloads] = await Promise.all([
+      apiFetch('/stats'     + ctx),
+      apiFetch('/events'    + ctx),
+      apiFetch('/workloads' + ctx),
     ]);
     renderStats(stats);
     renderEvents(events);
+    renderWorkloads(workloads);
     lastRefreshTime = Date.now();
     document.getElementById('refresh-indicator').textContent = 'just now';
     showContent();
@@ -251,6 +311,18 @@ async function refresh() {
 function scheduleRefresh() {
   if (refreshTimer) clearInterval(refreshTimer);
   refreshTimer = setInterval(refresh, interval());
+}
+
+// ── Page switch ──────────────────────────────────────────────────────────────
+function switchPage(index) {
+  currentPage = index;
+  savePage();
+  document.querySelectorAll('.page').forEach((p, i) => {
+    p.hidden = (i !== currentPage);
+  });
+  document.querySelectorAll('.page-dot').forEach(d => {
+    d.classList.toggle('active', Number(d.dataset.page) === currentPage);
+  });
 }
 
 // ── Context switch ───────────────────────────────────────────────────────────
@@ -295,6 +367,8 @@ async function init() {
     showError('Backend unreachable');
     return;
   }
+  loadStoredPage();
+  switchPage(currentPage);
   await refresh();
   scheduleRefresh();
   startRefreshIndicatorTick();
@@ -312,6 +386,9 @@ function applyStyles() {
 document.getElementById('ctx-prev').addEventListener('click',    () => switchContext(-1));
 document.getElementById('ctx-next').addEventListener('click',    () => switchContext(+1));
 document.getElementById('refresh-btn').addEventListener('click', () => { refresh(); scheduleRefresh(); });
+document.querySelectorAll('.page-dot').forEach(d => {
+  d.addEventListener('click', () => switchPage(Number(d.dataset.page)));
+});
 
 // ── iCUE hooks ───────────────────────────────────────────────────────────────
 function onIcueDataUpdated() {

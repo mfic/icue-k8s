@@ -302,19 +302,38 @@ def get_health_summary(context: str | None = Query(None)):
         # ── Crashing / restarting pods ───────────────────────────────────────
         BAD_REASONS = {'CrashLoopBackOff', 'OOMKilled', 'Error',
                        'ImagePullBackOff', 'ErrImagePull'}
-        crashing = []
+        now_utc   = datetime.now(timezone.utc)
+        cutoff_48h = 48 * 3600
+        crashing  = []
         for p in v1.list_pod_for_all_namespaces(limit=1000).items:
             for cs in (p.status.container_statuses or []):
                 reason = (cs.state.waiting.reason
                           if cs.state and cs.state.waiting else None)
-                if reason in BAD_REASONS or cs.restart_count > 10:
+                # Always surface pods actively stuck in a bad state
+                if reason in BAD_REASONS:
                     crashing.append({
                         'namespace': p.metadata.namespace,
                         'name':      p.metadata.name,
-                        'reason':    reason or 'HighRestarts',
+                        'reason':    reason,
                         'restarts':  cs.restart_count,
                     })
                     break
+                # High-restart pods only if the last failure was within 48 h
+                if cs.restart_count > 5:
+                    fin = None
+                    if cs.last_state and cs.last_state.terminated:
+                        fin = cs.last_state.terminated.finished_at
+                    if fin is not None:
+                        if fin.tzinfo is None:
+                            fin = fin.replace(tzinfo=timezone.utc)
+                        if (now_utc - fin).total_seconds() < cutoff_48h:
+                            crashing.append({
+                                'namespace': p.metadata.namespace,
+                                'name':      p.metadata.name,
+                                'reason':    'Restarting',
+                                'restarts':  cs.restart_count,
+                            })
+                            break
 
         # ── PVCs ─────────────────────────────────────────────────────────────
         pvc_counts: dict[str, int] = {'Bound': 0, 'Pending': 0, 'Lost': 0}

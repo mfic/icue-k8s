@@ -1,3 +1,5 @@
+set windows-shell := ["bash", "-c"]
+
 widget_name := "k8s"
 dist_dir    := "dist"
 

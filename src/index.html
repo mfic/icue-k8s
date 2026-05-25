@@ -46,6 +46,10 @@
         <span class="ctx-name"  id="ctx-name">—</span>
         <span class="ctx-arrow" id="ctx-next">›</span>
       </div>
+      <div class="ns-nav" id="ns-nav" hidden>
+        <span class="ns-nav-back" id="ns-nav-back">‹</span>
+        <span class="ctx-name"    id="ns-nav-name">—</span>
+      </div>
       <div class="header-right">
         <span class="page-dots" id="page-dots">
           <span class="page-dot active" data-page="0"></span>
@@ -94,6 +98,14 @@
         <div class="workloads-section">
           <div class="events-title">Workloads by namespace</div>
           <div class="workloads-list" id="workloads-list"></div>
+        </div>
+      </div>
+
+      <!-- Page 2: Namespace drill-down -->
+      <div class="page" id="page-2" hidden>
+        <div class="workloads-section">
+          <div class="events-title" id="ns-detail-title">Workloads</div>
+          <div class="wl-list" id="wl-list"></div>
         </div>
       </div>
 
@@ -235,7 +247,7 @@ function renderWorkloads(workloads) {
     const depPart  = ns.deployments.total > 0
       ? `<span class="ns-count"><b class="${depCls}">${ns.deployments.ready}/${ns.deployments.total}</b> dep</span>`
       : '';
-    return `<div class="ns-row">
+    return `<div class="ns-row" data-ns="${esc(ns.namespace)}">
       <div class="ns-name">${dot(cls + '-dot')} ${esc(ns.namespace)}</div>
       <div class="ns-counts">
         <span class="ns-count"><b class="${podCls}">${ns.pods.running}/${ns.pods.total}</b> pods</span>
@@ -316,13 +328,55 @@ function scheduleRefresh() {
 // ── Page switch ──────────────────────────────────────────────────────────────
 function switchPage(index) {
   currentPage = index;
-  savePage();
+  if (index < 2) savePage();   // don't persist the drill-down
   document.querySelectorAll('.page').forEach((p, i) => {
     p.hidden = (i !== currentPage);
   });
+  const dotActive = currentPage === 2 ? 1 : currentPage;
   document.querySelectorAll('.page-dot').forEach(d => {
-    d.classList.toggle('active', Number(d.dataset.page) === currentPage);
+    d.classList.toggle('active', Number(d.dataset.page) === dotActive);
   });
+  const onDetail = currentPage === 2;
+  document.getElementById('ctx-switcher').hidden = onDetail;
+  document.getElementById('ns-nav').hidden       = !onDetail;
+  document.getElementById('page-dots').hidden    = onDetail;
+}
+
+// ── Namespace drill-down ─────────────────────────────────────────────────────
+async function drillDown(ns) {
+  document.getElementById('ns-nav-name').textContent  = ns;
+  document.getElementById('ns-detail-title').textContent = ns;
+  document.getElementById('wl-list').innerHTML = '<div class="no-events">Loading…</div>';
+  switchPage(2);
+  try {
+    const ctx = currentContext() ? '?context=' + encodeURIComponent(currentContext()) : '';
+    const data = await apiFetch('/namespace/' + encodeURIComponent(ns) + '/workloads' + ctx);
+    renderWorkloadDetail(data);
+  } catch(err) {
+    document.getElementById('wl-list').innerHTML = '<div class="no-events">Failed to load</div>';
+  }
+}
+
+function goBack() { switchPage(1); }
+
+function renderWorkloadDetail(workloads) {
+  const list = document.getElementById('wl-list');
+  if (!workloads.length) {
+    list.innerHTML = '<div class="no-events">No workloads in this namespace</div>';
+    return;
+  }
+  const kindMap = { Deployment: ['D', 'dep'], StatefulSet: ['SS', 'sts'], DaemonSet: ['DS', 'ds'] };
+  list.innerHTML = workloads.map(w => {
+    const [badge, key] = kindMap[w.kind] || [w.kind[0], 'dep'];
+    const ok   = w.desired > 0 && w.ready >= w.desired;
+    const none = w.desired > 0 && w.ready === 0;
+    const cls  = none ? 'err' : !ok ? 'warn' : 'ok';
+    return `<div class="wl-row">
+      <span class="wl-kind wl-kind-${key}">${badge}</span>
+      <span class="wl-name">${esc(w.name)}</span>
+      <span class="wl-status">${dot(cls + '-dot')}${w.ready}/${w.desired}</span>
+    </div>`;
+  }).join('');
 }
 
 // ── Context switch ───────────────────────────────────────────────────────────
@@ -389,6 +443,11 @@ document.getElementById('refresh-btn').addEventListener('click', () => { refresh
 document.querySelectorAll('.page-dot').forEach(d => {
   d.addEventListener('click', () => switchPage(Number(d.dataset.page)));
 });
+document.getElementById('workloads-list').addEventListener('click', e => {
+  const row = e.target.closest('.ns-row');
+  if (row && row.dataset.ns) drillDown(row.dataset.ns);
+});
+document.getElementById('ns-nav-back').addEventListener('click', goBack);
 
 // ── iCUE hooks ───────────────────────────────────────────────────────────────
 function onIcueDataUpdated() {

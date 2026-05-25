@@ -207,6 +207,43 @@ def get_workloads(context: str | None = Query(None)):
         raise HTTPException(status_code=500, detail="Internal error — check server logs")
 
 
+@app.get("/namespace/{ns}/workloads")
+def get_namespace_workloads(ns: str, context: str | None = Query(None)):
+    context = validate_context(context)
+    try:
+        apps_v1 = get_api(context, client.AppsV1Api)
+        result  = []
+
+        for d in apps_v1.list_namespaced_deployment(ns).items:
+            result.append({
+                "kind":    "Deployment",
+                "name":    d.metadata.name,
+                "ready":   d.status.ready_replicas or 0,
+                "desired": d.status.replicas or 0,
+            })
+        for s in apps_v1.list_namespaced_stateful_set(ns).items:
+            result.append({
+                "kind":    "StatefulSet",
+                "name":    s.metadata.name,
+                "ready":   s.status.ready_replicas or 0,
+                "desired": s.spec.replicas or 0,
+            })
+        for d in apps_v1.list_namespaced_daemon_set(ns).items:
+            result.append({
+                "kind":    "DaemonSet",
+                "name":    d.metadata.name,
+                "ready":   d.status.number_ready or 0,
+                "desired": d.status.desired_number_scheduled or 0,
+            })
+
+        return sorted(result, key=lambda x: (x["kind"], x["name"]))
+    except HTTPException:
+        raise
+    except Exception:
+        log.exception("namespace workloads error")
+        raise HTTPException(status_code=500, detail="Internal error — check server logs")
+
+
 @app.get("/health")
 def health():
     return {"status": "ok"}

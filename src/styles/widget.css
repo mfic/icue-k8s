@@ -330,7 +330,10 @@ body {
   background: rgba(255,255,255,.03);
   border-radius: var(--radius);
   flex-shrink: 0;
+  cursor: pointer;
+  transition: background .15s;
 }
+.ns-row:hover { background: rgba(255,255,255,.07); }
 
 .ns-name {
   font-size: var(--font-small);
@@ -355,6 +358,70 @@ body {
 .ns-count b.ok     { color: var(--ok); }
 .ns-count b.warn   { color: var(--warn); }
 .ns-count b.err    { color: var(--err); }
+
+/* ── Namespace drill-down header ─────────────────────────── */
+.ns-nav {
+  display: flex;
+  align-items: center;
+  gap: calc(var(--layout-unit) * 1.5);
+}
+.ns-nav-back {
+  font-size: var(--font-label);
+  opacity: .6;
+  cursor: pointer;
+  user-select: none;
+  padding: 0 calc(var(--layout-unit) * 1);
+  -webkit-tap-highlight-color: transparent;
+}
+.ns-nav-back:hover { opacity: 1; }
+
+/* ── Workload detail rows ─────────────────────────────────── */
+.wl-list {
+  display: flex; flex-direction: column;
+  gap: calc(var(--layout-unit) * 1.2);
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding-right: calc(var(--layout-unit) * .5);
+}
+.wl-list::-webkit-scrollbar       { width: 3px; }
+.wl-list::-webkit-scrollbar-track { background: transparent; }
+.wl-list::-webkit-scrollbar-thumb { background: rgba(255,255,255,.18); border-radius: 2px; }
+
+.wl-row {
+  display: flex;
+  align-items: center;
+  gap: calc(var(--layout-unit) * 1.8);
+  padding: calc(var(--layout-unit) * 1.2) calc(var(--layout-unit) * 1.5);
+  background: rgba(255,255,255,.03);
+  border-radius: var(--radius);
+  flex-shrink: 0;
+}
+.wl-kind {
+  font-size: calc(var(--layout-unit) * 2.2);
+  font-weight: 700;
+  padding: calc(var(--layout-unit) * .3) calc(var(--layout-unit) * 1);
+  border-radius: calc(var(--layout-unit) * .8);
+  flex-shrink: 0;
+  letter-spacing: .04em;
+  min-width: calc(var(--layout-unit) * 5.5);
+  text-align: center;
+}
+.wl-kind-dep { background: rgba(50,108,229,.22);  color: #7ba7ff; }
+.wl-kind-sts { background: rgba(156,39,176,.22);  color: #ce93d8; }
+.wl-kind-ds  { background: rgba(0,188,212,.22);   color: #80deea; }
+.wl-name {
+  font-size: var(--font-small);
+  flex: 1;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.wl-status {
+  font-size: var(--font-small);
+  color: var(--muted);
+  white-space: nowrap;
+  flex-shrink: 0;
+  font-variant-numeric: tabular-nums;
+  display: flex; align-items: center; gap: calc(var(--layout-unit) * .8);
+}
 
 /* ── Pump LCD: square ────────────────────────────────────── */
 @media (aspect-ratio: 1/1) {

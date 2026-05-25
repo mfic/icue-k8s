@@ -22,6 +22,9 @@
 
 html { overflow: hidden; }
 
+/* Ensure [hidden] wins over any display:flex/block rules in author CSS */
+[hidden] { display: none !important; }
+
 *, *::before, *::after { box-sizing: border-box; }
 
 body {
@@ -299,7 +302,7 @@ body {
   gap: var(--gap);
   overflow: hidden;
 }
-.page[hidden] { display: none; }
+
 
 /* ── Workloads page ──────────────────────────────────────── */
 .workloads-section {

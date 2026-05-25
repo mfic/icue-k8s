@@ -187,6 +187,11 @@ function renderStats(s) {
 }
 
 // ── Render events ─────────────────────────────────────────────────────────────
+function esc(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+                  .replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+}
+
 function renderEvents(events) {
   const list = document.getElementById('events-list');
   if (!events.length) {
@@ -195,16 +200,16 @@ function renderEvents(events) {
   }
   list.innerHTML = events.slice(0, 20).map(e => {
     const cls = e.type === 'Warning' ? 'warn' : 'err';
-    const src = `<strong>${e.namespace}</strong>/${e.name}`;
-    const cnt = e.count > 1 ? ` ×${e.count}` : '';
-    const msg = e.message ? e.message.replace(/</g, '&lt;').replace(/>/g, '&gt;') : '';
+    const src = `<strong>${esc(e.namespace)}</strong>/${esc(e.name)}`;
+    const cnt = e.count > 1 ? ` ×${esc(String(e.count))}` : '';
+    const msg = esc(e.message || '');
     return `<div class="event-row ${cls}">
       <div class="event-left">
         <span class="event-source">${src}</span>
         <span class="event-message">${msg}</span>
       </div>
       <div class="event-right">
-        <span class="event-reason">${e.reason}${cnt}</span>
+        <span class="event-reason">${esc(e.reason)}${cnt}</span>
         <span class="event-time">${timeAgo(e.time)}</span>
       </div>
     </div>`;

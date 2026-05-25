@@ -1,6 +1,6 @@
 {
-  "author": "Your Name",
-  "id": "com.author.k8swidget",
+  "author": "mfic",
+  "id": "com.mfic.k8swidget",
   "name": "K8s Cluster",
   "description": "Kubernetes cluster statistics and error events",
   "version": "1.0.0",

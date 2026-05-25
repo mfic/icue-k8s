@@ -8,8 +8,18 @@ import yaml, os, logging
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger(__name__)
 
-app = FastAPI(title="iCUE K8s Backend")
+_DEBUG = os.getenv("DEBUG", "").lower() in ("1", "true")
 
+app = FastAPI(
+    title="iCUE K8s Backend",
+    docs_url="/docs" if _DEBUG else None,
+    redoc_url=None,
+    openapi_url="/openapi.json" if _DEBUG else None,
+)
+
+# Wildcard origin is intentional: the iCUE widget framework serves files from
+# non-HTTP schemes that can't be allowlisted. The 127.0.0.1 bind is the real
+# network boundary. Set DEBUG=true to enable /docs.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -32,6 +42,16 @@ def parse_kubeconfig() -> dict:
         return yaml.safe_load(f)
 
 
+def validate_context(context: str | None) -> str | None:
+    if context is None:
+        return None
+    kc = parse_kubeconfig()
+    valid = {c["name"] for c in kc.get("contexts", [])}
+    if context not in valid:
+        raise HTTPException(status_code=400, detail="Unknown context")
+    return context
+
+
 @app.get("/contexts")
 def list_contexts():
     try:
@@ -39,19 +59,23 @@ def list_contexts():
         current = kc.get("current-context", "")
         contexts = [c["name"] for c in kc.get("contexts", [])]
         return {"contexts": contexts, "current": current}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    except HTTPException:
+        raise
+    except Exception:
+        log.exception("contexts error")
+        raise HTTPException(status_code=500, detail="Internal error — check server logs")
 
 
 @app.get("/stats")
 def get_stats(context: str | None = Query(None)):
+    context = validate_context(context)
     try:
-        v1     = get_api(context, client.CoreV1Api)
+        v1      = get_api(context, client.CoreV1Api)
         apps_v1 = get_api(context, client.AppsV1Api)
 
-        nodes       = v1.list_node()
-        node_total  = len(nodes.items)
-        node_ready  = sum(
+        nodes      = v1.list_node()
+        node_total = len(nodes.items)
+        node_ready = sum(
             1 for n in nodes.items
             for c in (n.status.conditions or [])
             if c.type == "Ready" and c.status == "True"
@@ -63,9 +87,9 @@ def get_stats(context: str | None = Query(None)):
             phase = p.status.phase or "Unknown"
             pod_phases[phase] = pod_phases.get(phase, 0) + 1
 
-        deploys    = apps_v1.list_deployment_for_all_namespaces()
-        dep_total  = len(deploys.items)
-        dep_ready  = sum(
+        deploys      = apps_v1.list_deployment_for_all_namespaces()
+        dep_total    = len(deploys.items)
+        dep_ready    = sum(
             1 for d in deploys.items
             if (d.status.ready_replicas or 0) >= (d.status.replicas or 0) > 0
         )
@@ -74,7 +98,7 @@ def get_stats(context: str | None = Query(None)):
         namespaces = v1.list_namespace()
         ns_count   = len(namespaces.items)
 
-        kc      = parse_kubeconfig()
+        kc       = parse_kubeconfig()
         ctx_name = context or kc.get("current-context", "unknown")
 
         return {
@@ -84,13 +108,19 @@ def get_stats(context: str | None = Query(None)):
             "deployments": {"ready": dep_ready, "degraded": dep_degraded, "total": dep_total},
             "namespaces":  ns_count,
         }
-    except Exception as e:
+    except HTTPException:
+        raise
+    except Exception:
         log.exception("stats error")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal error — check server logs")
 
 
 @app.get("/events")
-def get_events(context: str | None = Query(None), limit: int = 20):
+def get_events(
+    context: str | None = Query(None),
+    limit: int = Query(20, ge=1, le=100),
+):
+    context = validate_context(context)
     try:
         v1     = get_api(context, client.CoreV1Api)
         events = v1.list_event_for_all_namespaces(
@@ -122,9 +152,11 @@ def get_events(context: str | None = Query(None), limit: int = 20):
                 "time":      t.isoformat() if t != datetime.min.replace(tzinfo=timezone.utc) else None,
             })
         return result
-    except Exception as e:
+    except HTTPException:
+        raise
+    except Exception:
         log.exception("events error")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal error — check server logs")
 
 
 @app.get("/health")

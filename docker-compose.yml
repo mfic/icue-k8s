@@ -11,9 +11,9 @@ services:
   backend:
     build: ./backend
     ports:
-      - "9090:9090"
+      - "127.0.0.1:9090:9090"
     volumes:
-      - "${HOME}/.kube:/root/.kube:ro"
+      - ~/.kube:/root/.kube:ro
     environment:
       KUBECONFIG: /root/.kube/config
     restart: unless-stopped

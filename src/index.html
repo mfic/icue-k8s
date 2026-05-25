@@ -1,0 +1,322 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>tr('K8s Cluster')</title>
+  <link rel="icon" type="image/svg+xml" href="resources/icon.svg" />
+
+  <meta name="x-icue-property" content="apiUrl"          data-label="tr('Backend URL')"    data-type="textfield" data-default="'http://localhost:9090'" />
+  <meta name="x-icue-property" content="refreshInterval" data-label="tr('Refresh (sec)')"  data-type="slider"    data-default="30" data-min="10" data-max="120" data-step="5" />
+  <meta name="x-icue-property" content="accentColor"     data-label="tr('Accent Color')"   data-type="color"     data-default="'#326ce5'" />
+  <meta name="x-icue-property" content="backgroundColor" data-label="tr('Background')"     data-type="color"     data-default="'#07080f'" />
+  <meta name="x-icue-property" content="transparency"    data-label="tr('Transparency')"   data-type="slider"    data-default="100" data-min="0" data-max="100" data-step="1" />
+
+  <script id="x-icue-groups" type="application/json">
+  [
+    { "title": "tr('K8s Backend')",          "properties": ["apiUrl", "refreshInterval"] },
+    { "title": "tr('Widget Personalization')", "properties": ["accentColor", "backgroundColor", "transparency"] }
+  ]
+  </script>
+
+  <link rel="stylesheet" href="styles/widget.css" />
+</head>
+<body>
+<div class="widget-root">
+  <div class="widget-background" aria-hidden="true"><div class="main-glass"></div></div>
+
+  <!-- State overlays -->
+  <div class="state-overlay" id="state-loading">
+    <div class="state-icon">⎈</div>
+    <div class="state-msg">Connecting to cluster…</div>
+  </div>
+  <div class="state-overlay" id="state-error" style="display:none">
+    <div class="state-icon">✕</div>
+    <div class="state-msg"  id="err-msg">Connection failed</div>
+    <div class="state-hint" id="err-hint">Make sure the backend is running:<br><code>just backend</code></div>
+  </div>
+
+  <!-- Main content -->
+  <div class="main-content" id="content" style="display:none">
+
+    <!-- Header -->
+    <div class="header">
+      <div class="ctx-switcher" id="ctx-switcher">
+        <span class="ctx-arrow" id="ctx-prev">‹</span>
+        <span class="ctx-name"  id="ctx-name">—</span>
+        <span class="ctx-arrow" id="ctx-next">›</span>
+      </div>
+      <div class="header-right">
+        <span class="refresh-indicator" id="refresh-indicator"></span>
+        <span class="refresh-btn" id="refresh-btn" title="Refresh">↻</span>
+      </div>
+    </div>
+
+    <!-- Stats row -->
+    <div class="stats-row">
+      <div class="stat-card">
+        <div class="stat-label">Nodes</div>
+        <div class="stat-value" id="nodes-value">—</div>
+        <div class="stat-sub"   id="nodes-sub"></div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Pods</div>
+        <div class="stat-value" id="pods-value">—</div>
+        <div class="stat-sub"   id="pods-sub"></div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Deployments</div>
+        <div class="stat-value" id="dep-value">—</div>
+        <div class="stat-sub"   id="dep-sub"></div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Namespaces</div>
+        <div class="stat-value" id="ns-value">—</div>
+        <div class="stat-sub"   id="ns-sub"></div>
+      </div>
+    </div>
+
+    <!-- Events section -->
+    <div class="events-section">
+      <div class="events-title">Recent warnings &amp; errors</div>
+      <div class="events-list" id="events-list"></div>
+    </div>
+
+  </div>
+</div>
+
+<script>
+// ── iCUE bindings ────────────────────────────────────────────────────────────
+icueEvents = {
+  onDataUpdated:     onIcueDataUpdated,
+  onICUEInitialized: onIcueInitialized
+};
+
+function getIcueProperty(name) {
+  if (typeof window !== 'undefined' && Object.prototype.hasOwnProperty.call(window, name)) {
+    const v = window[name]; if (v !== undefined && v !== null && v !== '') return v;
+  }
+  try { return Function('return typeof '+name+' !== "undefined" ? '+name+' : undefined')(); }
+  catch(e) { return undefined; }
+}
+
+// ── State ────────────────────────────────────────────────────────────────────
+let contexts        = [];
+let contextIndex    = 0;
+let refreshTimer    = null;
+let lastRefreshTime = null;
+let refreshTick     = null;
+const STORAGE_KEY   = 'k8s-widget-ctx-index';
+
+function currentContext() { return contexts[contextIndex] || null; }
+
+function loadStoredIndex() {
+  try { const v = localStorage.getItem(STORAGE_KEY); if (v !== null) contextIndex = parseInt(v, 10) || 0; }
+  catch(e) {}
+}
+function saveIndex() {
+  try { localStorage.setItem(STORAGE_KEY, String(contextIndex)); } catch(e) {}
+}
+
+// ── Utils ────────────────────────────────────────────────────────────────────
+function timeAgo(isoStr) {
+  if (!isoStr) return '?';
+  const diff = Math.floor((Date.now() - new Date(isoStr).getTime()) / 1000);
+  if (diff < 60)   return diff + 's ago';
+  if (diff < 3600) return Math.floor(diff/60) + 'm ago';
+  if (diff < 86400) return Math.floor(diff/3600) + 'h ago';
+  return Math.floor(diff/86400) + 'd ago';
+}
+
+function dot(cls) { return `<span class="dot ${cls}"></span>`; }
+
+function baseUrl() {
+  return (getIcueProperty('apiUrl') || 'http://localhost:9090').replace(/\/$/, '');
+}
+
+function interval() {
+  const v = Number(getIcueProperty('refreshInterval'));
+  return (Number.isFinite(v) && v >= 10 ? v : 30) * 1000;
+}
+
+// ── Fetch helpers ────────────────────────────────────────────────────────────
+async function apiFetch(path) {
+  const r = await fetch(baseUrl() + path, { signal: AbortSignal.timeout(10000) });
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  return r.json();
+}
+
+// ── Render contexts ──────────────────────────────────────────────────────────
+function renderCtx() {
+  const name = currentContext();
+  document.getElementById('ctx-name').textContent = name || '—';
+  document.getElementById('ctx-prev').style.visibility = contexts.length > 1 ? 'visible' : 'hidden';
+  document.getElementById('ctx-next').style.visibility = contexts.length > 1 ? 'visible' : 'hidden';
+}
+
+// ── Render stats ─────────────────────────────────────────────────────────────
+function renderStats(s) {
+  // Nodes
+  const nodeReady = s.nodes.ready, nodeTotal = s.nodes.total;
+  const nodeCls = nodeReady === nodeTotal ? 'dot-ok' : nodeReady > 0 ? 'dot-warn' : 'dot-err';
+  document.getElementById('nodes-value').innerHTML = dot(nodeCls) + nodeReady + '/' + nodeTotal;
+  document.getElementById('nodes-sub').textContent  = nodeTotal === nodeReady ? 'all ready' : (nodeTotal - nodeReady) + ' not ready';
+
+  // Pods
+  const running   = s.pods.Running   || 0;
+  const pending   = s.pods.Pending   || 0;
+  const failed    = s.pods.Failed    || 0;
+  const total     = Object.values(s.pods).reduce((a, b) => a + b, 0);
+  const podCls    = failed > 0 ? 'dot-err' : pending > 0 ? 'dot-warn' : 'dot-ok';
+  document.getElementById('pods-value').innerHTML = dot(podCls) + running;
+  const parts = [];
+  if (pending)  parts.push(pending  + ' pending');
+  if (failed)   parts.push(failed   + ' failed');
+  if (!parts.length) parts.push('all running');
+  document.getElementById('pods-sub').textContent = parts.join(' · ');
+
+  // Deployments
+  const depReady = s.deployments.ready, depTotal = s.deployments.total, depDeg = s.deployments.degraded;
+  const depCls   = depDeg > 0 ? 'dot-warn' : 'dot-ok';
+  document.getElementById('dep-value').innerHTML = dot(depCls) + depReady + '/' + depTotal;
+  document.getElementById('dep-sub').textContent  = depDeg > 0 ? depDeg + ' degraded' : 'all ready';
+
+  // Namespaces
+  document.getElementById('ns-value').textContent = s.namespaces;
+  document.getElementById('ns-sub').textContent   = 'active';
+}
+
+// ── Render events ─────────────────────────────────────────────────────────────
+function renderEvents(events) {
+  const list = document.getElementById('events-list');
+  if (!events.length) {
+    list.innerHTML = '<div class="no-events">✓ No warnings or errors</div>';
+    return;
+  }
+  list.innerHTML = events.slice(0, 8).map(e => {
+    const cls  = e.type === 'Warning' ? 'warn' : 'err';
+    const src  = `<strong>${e.namespace}</strong>/${e.name}`;
+    const cnt  = e.count > 1 ? ` ×${e.count}` : '';
+    return `<div class="event-row ${cls}">
+      <span class="event-source">${src}</span>
+      <span class="event-reason">${e.reason}${cnt}</span>
+      <span class="event-time">${timeAgo(e.time)}</span>
+    </div>`;
+  }).join('');
+}
+
+// ── Refresh logic ────────────────────────────────────────────────────────────
+function startRefreshIndicatorTick() {
+  if (refreshTick) clearInterval(refreshTick);
+  refreshTick = setInterval(() => {
+    if (!lastRefreshTime) return;
+    const secs = Math.floor((Date.now() - lastRefreshTime) / 1000);
+    document.getElementById('refresh-indicator').textContent = secs + 's ago';
+  }, 5000);
+}
+
+async function refresh() {
+  const btn = document.getElementById('refresh-btn');
+  document.getElementById('widget-root')?.classList.add('refreshing');
+  btn.style.animation = 'spin .6s linear infinite';
+  try {
+    const ctx = currentContext() ? '?context=' + encodeURIComponent(currentContext()) : '';
+    const [stats, events] = await Promise.all([
+      apiFetch('/stats'  + ctx),
+      apiFetch('/events' + ctx),
+    ]);
+    renderStats(stats);
+    renderEvents(events);
+    lastRefreshTime = Date.now();
+    document.getElementById('refresh-indicator').textContent = 'just now';
+    showContent();
+  } catch(err) {
+    showError(err.message || 'Connection failed');
+  } finally {
+    btn.style.animation = '';
+  }
+}
+
+function scheduleRefresh() {
+  if (refreshTimer) clearInterval(refreshTimer);
+  refreshTimer = setInterval(refresh, interval());
+}
+
+// ── Context switch ───────────────────────────────────────────────────────────
+function switchContext(delta) {
+  if (contexts.length < 2) return;
+  contextIndex = ((contextIndex + delta) % contexts.length + contexts.length) % contexts.length;
+  saveIndex();
+  renderCtx();
+  refresh();
+}
+
+// ── Show/hide ────────────────────────────────────────────────────────────────
+function showContent() {
+  document.getElementById('state-loading').style.display = 'none';
+  document.getElementById('state-error').style.display   = 'none';
+  document.getElementById('content').style.display       = 'flex';
+}
+function showLoading() {
+  document.getElementById('state-loading').style.display = '';
+  document.getElementById('state-error').style.display   = 'none';
+  document.getElementById('content').style.display       = 'none';
+}
+function showError(msg) {
+  document.getElementById('state-loading').style.display = 'none';
+  document.getElementById('state-error').style.display   = '';
+  document.getElementById('content').style.display       = 'none';
+  document.getElementById('err-msg').textContent = msg;
+}
+
+// ── Init ─────────────────────────────────────────────────────────────────────
+async function init() {
+  showLoading();
+  try {
+    const data = await apiFetch('/contexts');
+    contexts = data.contexts || [];
+    loadStoredIndex();
+    contextIndex = Math.min(contextIndex, Math.max(0, contexts.length - 1));
+    const currentIdx = contexts.indexOf(data.current);
+    if (currentIdx >= 0 && !localStorage.getItem(STORAGE_KEY)) contextIndex = currentIdx;
+    renderCtx();
+  } catch(err) {
+    showError('Backend unreachable');
+    return;
+  }
+  await refresh();
+  scheduleRefresh();
+  startRefreshIndicatorTick();
+}
+
+// ── Apply styles ─────────────────────────────────────────────────────────────
+function applyStyles() {
+  const root = document.documentElement;
+  root.style.setProperty('--accent-color', getIcueProperty('accentColor')     || '#326ce5');
+  root.style.setProperty('--bg-color',     getIcueProperty('backgroundColor') || '#07080f');
+  root.style.setProperty('--bg-opacity',   (Number(getIcueProperty('transparency')) || 100) / 100);
+}
+
+// ── Event listeners ───────────────────────────────────────────────────────────
+document.getElementById('ctx-prev').addEventListener('click',    () => switchContext(-1));
+document.getElementById('ctx-next').addEventListener('click',    () => switchContext(+1));
+document.getElementById('refresh-btn').addEventListener('click', () => { refresh(); scheduleRefresh(); });
+
+// ── iCUE hooks ───────────────────────────────────────────────────────────────
+function onIcueDataUpdated() {
+  applyStyles();
+  scheduleRefresh();
+}
+function onIcueInitialized() {
+  applyStyles();
+  init();
+}
+
+if (typeof iCUE_initialized !== 'undefined' && iCUE_initialized) {
+  onIcueInitialized();
+} else {
+  onIcueInitialized();
+}
+</script>
+</body>
+</html>

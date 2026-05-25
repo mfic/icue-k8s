@@ -90,7 +90,7 @@ def get_stats(context: str | None = Query(None)):
 
 
 @app.get("/events")
-def get_events(context: str | None = Query(None), limit: int = 15):
+def get_events(context: str | None = Query(None), limit: int = 20):
     try:
         v1     = get_api(context, client.CoreV1Api)
         events = v1.list_event_for_all_namespaces(

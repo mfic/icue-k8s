@@ -193,7 +193,7 @@ function renderEvents(events) {
     list.innerHTML = '<div class="no-events">✓ No warnings or errors</div>';
     return;
   }
-  list.innerHTML = events.slice(0, 8).map(e => {
+  list.innerHTML = events.slice(0, 20).map(e => {
     const cls = e.type === 'Warning' ? 'warn' : 'err';
     const src = `<strong>${e.namespace}</strong>/${e.name}`;
     const cnt = e.count > 1 ? ` ×${e.count}` : '';

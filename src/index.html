@@ -194,13 +194,19 @@ function renderEvents(events) {
     return;
   }
   list.innerHTML = events.slice(0, 8).map(e => {
-    const cls  = e.type === 'Warning' ? 'warn' : 'err';
-    const src  = `<strong>${e.namespace}</strong>/${e.name}`;
-    const cnt  = e.count > 1 ? ` ×${e.count}` : '';
+    const cls = e.type === 'Warning' ? 'warn' : 'err';
+    const src = `<strong>${e.namespace}</strong>/${e.name}`;
+    const cnt = e.count > 1 ? ` ×${e.count}` : '';
+    const msg = e.message ? e.message.replace(/</g, '&lt;').replace(/>/g, '&gt;') : '';
     return `<div class="event-row ${cls}">
-      <span class="event-source">${src}</span>
-      <span class="event-reason">${e.reason}${cnt}</span>
-      <span class="event-time">${timeAgo(e.time)}</span>
+      <div class="event-left">
+        <span class="event-source">${src}</span>
+        <span class="event-message">${msg}</span>
+      </div>
+      <div class="event-right">
+        <span class="event-reason">${e.reason}${cnt}</span>
+        <span class="event-time">${timeAgo(e.time)}</span>
+      </div>
     </div>`;
   }).join('');
 }
